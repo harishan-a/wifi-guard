@@ -11,7 +11,7 @@ final class NotificationManager {
 
     /// Request notification authorization.
     func requestAuthorization() async {
-        try? await center.requestAuthorization(options: [.alert, .sound])
+        _ = try? await center.requestAuthorization(options: [.alert, .sound])
     }
 
     /// Send a local notification.

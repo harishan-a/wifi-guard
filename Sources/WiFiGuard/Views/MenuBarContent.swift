@@ -21,7 +21,10 @@ struct MenuBarContent: View {
 
         Divider()
 
-        // Settings... (Phase 5)
+        Button("Settings...") {
+            openWindow(id: "settings")
+        }
+        .keyboardShortcut(",")
 
         Button("Quit WiFi Guard") {
             NSApplication.shared.terminate(nil)
