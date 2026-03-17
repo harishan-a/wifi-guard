@@ -1,0 +1,19 @@
+{
+  "": {
+    "swift-dependencies": "/Users/harishanamutheesan/Developer/WiFiGuard/.build/arm64-apple-macosx/debug/WiFiGuard.build/master.swiftdeps"
+  },
+  "/Users/harishanamutheesan/Developer/WiFiGuard/Sources/WiFiGuard/App/AppDelegate.swift": {
+    "dependencies": "/Users/harishanamutheesan/Developer/WiFiGuard/.build/arm64-apple-macosx/debug/WiFiGuard.build/AppDelegate.d",
+    "object": "/Users/harishanamutheesan/Developer/WiFiGuard/.build/arm64-apple-macosx/debug/WiFiGuard.build/AppDelegate.swift.o",
+    "swiftmodule": "/Users/harishanamutheesan/Developer/WiFiGuard/.build/arm64-apple-macosx/debug/WiFiGuard.build/AppDelegate~partial.swiftmodule",
+    "swift-dependencies": "/Users/harishanamutheesan/Developer/WiFiGuard/.build/arm64-apple-macosx/debug/WiFiGuard.build/AppDelegate.swiftdeps",
+    "diagnostics": "/Users/harishanamutheesan/Developer/WiFiGuard/.build/arm64-apple-macosx/debug/WiFiGuard.build/AppDelegate.dia"
+  },
+  "/Users/harishanamutheesan/Developer/WiFiGuard/Sources/WiFiGuard/App/WiFiGuardApp.swift": {
+    "dependencies": "/Users/harishanamutheesan/Developer/WiFiGuard/.build/arm64-apple-macosx/debug/WiFiGuard.build/WiFiGuardApp.d",
+    "object": "/Users/harishanamutheesan/Developer/WiFiGuard/.build/arm64-apple-macosx/debug/WiFiGuard.build/WiFiGuardApp.swift.o",
+    "swiftmodule": "/Users/harishanamutheesan/Developer/WiFiGuard/.build/arm64-apple-macosx/debug/WiFiGuard.build/WiFiGuardApp~partial.swiftmodule",
+    "swift-dependencies": "/Users/harishanamutheesan/Developer/WiFiGuard/.build/arm64-apple-macosx/debug/WiFiGuard.build/WiFiGuardApp.swiftdeps",
+    "diagnostics": "/Users/harishanamutheesan/Developer/WiFiGuard/.build/arm64-apple-macosx/debug/WiFiGuard.build/WiFiGuardApp.dia"
+  }
+}
