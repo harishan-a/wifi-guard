@@ -6,13 +6,14 @@ import SwiftUI
 /// Uses `.menu` style, so only Button, Toggle, Text, Divider, Menu, and Section are permitted.
 struct MenuBarContent: View {
     let state: ConnectionState
+    let disconnectLog: DisconnectLog
 
     var body: some View {
         statusSection
 
         Divider()
 
-        // Recent disconnects placeholder (Phase 3)
+        recentDisconnectsSection
 
         // Quick actions placeholder (Phase 4)
 
@@ -39,7 +40,6 @@ extension MenuBarContent {
         }
     }
 
-    /// Top-line indicator: connected SSID, Wi-Fi off, or disconnected.
     @ViewBuilder
     private var statusHeadline: some View {
         if state.isConnected {
@@ -51,7 +51,6 @@ extension MenuBarContent {
         }
     }
 
-    /// Signal, IP, gateway, and uptime rows shown when connected.
     @ViewBuilder
     private var connectionDetails: some View {
         let quality = SignalStrength.from(rssi: state.rssi)
@@ -70,7 +69,6 @@ extension MenuBarContent {
         }
     }
 
-    /// Gateway row with optional latency.
     @ViewBuilder
     private var gatewayText: some View {
         if let latency = state.gatewayLatencyMs {
@@ -81,22 +79,32 @@ extension MenuBarContent {
     }
 }
 
-// MARK: - Preview
+// MARK: - Recent Disconnects
 
-#Preview {
-    // Simulated connected state
-    let preview: ConnectionState = {
-        let s = ConnectionState()
-        s.isConnected = true
-        s.ssid = "HomeNetwork"
-        s.rssi = -52
-        s.ipAddress = "192.168.1.42"
-        s.gatewayIP = "192.168.1.1"
-        s.gatewayLatencyMs = 4.2
-        s.connectedSince = Date().addingTimeInterval(-3725)
-        s.isWiFiPoweredOn = true
-        return s
+extension MenuBarContent {
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d, h:mm a"
+        return f
     }()
 
-    MenuBarContent(state: preview)
+    @ViewBuilder
+    private var recentDisconnectsSection: some View {
+        if !disconnectLog.events.isEmpty {
+            Menu("Recent Disconnects") {
+                ForEach(disconnectLog.recentEvents) { event in
+                    let dateStr = Self.dateFormatter.string(from: event.date)
+                    let durStr = event.duration > 0
+                        ? " (\(DurationFormatter.format(event.duration)))"
+                        : ""
+                    Text("\(dateStr) \u{2014} \(event.reason)\(durStr)")
+                }
+                Divider()
+                Button("View Full Log...") {
+                    // Phase 4: opens DisconnectLogView window
+                }
+            }
+            Divider()
+        }
+    }
 }
