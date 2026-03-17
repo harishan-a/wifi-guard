@@ -40,51 +40,41 @@ actor ShellExecutor {
 
         try process.run()
 
-        let result = await withTaskGroup(of: CommandResult?.self) { group in
-            group.addTask {
-                process.waitUntilExit()
-                let stdout = String(
-                    data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
-                    encoding: .utf8
-                ) ?? ""
-                let stderr = String(
-                    data: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
-                    encoding: .utf8
-                ) ?? ""
-                return CommandResult(
-                    exitCode: process.terminationStatus,
-                    output: stdout,
-                    error: stderr
-                )
-            }
+        // Read pipe data BEFORE waitUntilExit to avoid deadlock
+        // when the subprocess fills the pipe buffer (64 KB on macOS).
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
 
-            group.addTask {
-                try? await Task.sleep(for: .seconds(timeout))
-                if process.isRunning {
-                    process.terminate()
-                }
-                return nil
+        // Use a background task to enforce the timeout
+        let timedOut = UnsafeSendableBox(value: false)
+        let timeoutTask = Task.detached {
+            try? await Task.sleep(for: .seconds(timeout))
+            if process.isRunning {
+                process.terminate()
+                timedOut.value = true
             }
-
-            let first = await group.next()!
-            group.cancelAll()
-            return first
         }
 
-        if let result {
-            return result
+        process.waitUntilExit()
+        timeoutTask.cancel()
+
+        if timedOut.value {
+            throw ShellError.timeout
         }
-        throw ShellError.timeout
+
+        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+
+        return CommandResult(
+            exitCode: process.terminationStatus,
+            output: stdout,
+            error: stderr
+        )
     }
 
     // MARK: - Convenience
 
     /// Run a path-based command with variadic arguments.
-    ///
-    /// Example:
-    /// ```swift
-    /// let result = try await shell.runCommand("/usr/sbin/networksetup", "-getairportpower", "en0")
-    /// ```
     func runCommand(
         _ path: String,
         _ args: String...,
@@ -92,4 +82,10 @@ actor ShellExecutor {
     ) async throws -> CommandResult {
         try await run(path, arguments: Array(args), timeout: timeout)
     }
+}
+
+// Helper for thread-safe flag sharing
+private final class UnsafeSendableBox<T>: @unchecked Sendable {
+    var value: T
+    init(value: T) { self.value = value }
 }

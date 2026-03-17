@@ -117,21 +117,21 @@ extension MenuBarContent {
 // MARK: - Quick Actions
 
 extension MenuBarContent {
-    private var shell: ShellExecutor { ShellExecutor() }
+    private static let shell = ShellExecutor()
 
     @ViewBuilder
     private var quickActionsSection: some View {
         Button("Restart Wi-Fi") {
             Task {
-                _ = try? await shell.runCommand("/usr/sbin/networksetup", "-setairportpower", "en0", "off")
+                _ = try? await Self.shell.runCommand("/usr/sbin/networksetup", "-setairportpower", "en0", "off")
                 try? await Task.sleep(for: .seconds(2))
-                _ = try? await shell.runCommand("/usr/sbin/networksetup", "-setairportpower", "en0", "on")
+                _ = try? await Self.shell.runCommand("/usr/sbin/networksetup", "-setairportpower", "en0", "on")
             }
         }
         Button("Flush DNS") {
             Task {
-                _ = try? await shell.runCommand("/usr/bin/dscacheutil", "-flushcache")
-                _ = try? await shell.runCommand("/usr/bin/killall", "-HUP", "mDNSResponder")
+                _ = try? await Self.shell.runCommand("/usr/bin/dscacheutil", "-flushcache")
+                _ = try? await Self.shell.runCommand("/usr/bin/killall", "-HUP", "mDNSResponder")
             }
         }
         Button("Copy IP Address") {

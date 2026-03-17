@@ -19,7 +19,7 @@ final class WiFiMonitor: NSObject {
 
     // MARK: - Private properties
 
-    private let pathMonitor = NWPathMonitor()
+    private var pathMonitor: NWPathMonitor?
     private let monitorQueue = DispatchQueue(label: "com.wifiguard.pathmonitor")
     private let wifiClient = CWWiFiClient.shared()
     private let shell = ShellExecutor()
@@ -40,13 +40,15 @@ final class WiFiMonitor: NSObject {
         isMonitoring = true
 
         // -- NWPathMonitor for connectivity changes --
-        pathMonitor.pathUpdateHandler = { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                await self.refreshState()
+        // Create a fresh monitor each time (cancel() is terminal)
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.refreshState()
             }
         }
-        pathMonitor.start(queue: monitorQueue)
+        monitor.start(queue: monitorQueue)
+        pathMonitor = monitor
 
         // -- CWEventDelegate for SSID / link changes --
         wifiClient.delegate = self
@@ -58,9 +60,8 @@ final class WiFiMonitor: NSObject {
         let timer = DispatchSource.makeTimerSource(queue: monitorQueue)
         timer.schedule(deadline: .now(), repeating: 10.0)
         timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                await self.refreshState()
+            Task { @MainActor [weak self] in
+                await self?.refreshState()
             }
         }
         timer.resume()
@@ -77,7 +78,8 @@ final class WiFiMonitor: NSObject {
         guard isMonitoring else { return }
         isMonitoring = false
 
-        pathMonitor.cancel()
+        pathMonitor?.cancel()
+        pathMonitor = nil
 
         wifiClient.delegate = nil
         try? wifiClient.stopMonitoringAllEvents()
@@ -144,7 +146,6 @@ final class WiFiMonitor: NSObject {
 
     // MARK: - Shell helpers
 
-    /// Fetch the local IP address for en0.
     private func fetchIPAddress() async -> String {
         guard let result = try? await shell.runCommand(
             "/usr/sbin/ipconfig", "getifaddr", "en0"
@@ -154,7 +155,6 @@ final class WiFiMonitor: NSObject {
         return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Parse the "Router:" line from `networksetup -getinfo Wi-Fi`.
     private func fetchGatewayIP() async -> String {
         guard let result = try? await shell.runCommand(
             "/usr/sbin/networksetup", "-getinfo", "Wi-Fi"
@@ -166,7 +166,6 @@ final class WiFiMonitor: NSObject {
                 let ip = line
                     .replacingOccurrences(of: "Router:", with: "")
                     .trimmingCharacters(in: .whitespaces)
-                // "Router: none" when not set
                 return ip == "none" ? "" : ip
             }
         }
@@ -174,14 +173,14 @@ final class WiFiMonitor: NSObject {
     }
 
     /// Ping the gateway once and parse `time=<ms>` from the output.
+    /// Note: macOS `ping -W` expects milliseconds.
     private func fetchGatewayLatency(gateway: String) async -> Double? {
         guard let result = try? await shell.runCommand(
-            "/sbin/ping", "-c", "1", "-W", "2", gateway,
+            "/sbin/ping", "-c", "1", "-W", "2000", gateway,
             timeout: 5
         ), result.exitCode == 0 else {
             return nil
         }
-        // Look for "time=12.345 ms" in the output
         let output = result.output
         guard let timeRange = output.range(of: "time=") else { return nil }
         let afterTime = output[timeRange.upperBound...]
@@ -193,32 +192,29 @@ final class WiFiMonitor: NSObject {
 
 // MARK: - CWEventDelegate
 
-/// CWEventDelegate callbacks are invoked on arbitrary threads, so this
-/// conformance is non-isolated. Each callback bounces to @MainActor
-/// to trigger a state refresh.
 extension WiFiMonitor: CWEventDelegate {
 
     nonisolated func clientConnectionDidDissociate() {
-        Task { @MainActor in
-            await self.refreshState()
+        Task { @MainActor [weak self] in
+            await self?.refreshState()
         }
     }
 
     nonisolated func ssidDidChangeForWiFiInterface(withName interfaceName: String) {
-        Task { @MainActor in
-            await self.refreshState()
+        Task { @MainActor [weak self] in
+            await self?.refreshState()
         }
     }
 
     nonisolated func linkDidChangeForWiFiInterface(withName interfaceName: String) {
-        Task { @MainActor in
-            await self.refreshState()
+        Task { @MainActor [weak self] in
+            await self?.refreshState()
         }
     }
 
     nonisolated func powerStateDidChangeForWiFiInterface(withName interfaceName: String) {
-        Task { @MainActor in
-            await self.refreshState()
+        Task { @MainActor [weak self] in
+            await self?.refreshState()
         }
     }
 }

@@ -30,9 +30,7 @@ final class GlobalHotkeyManager {
         monitor = nil
     }
 
-    deinit {
-        if let monitor {
-            NSEvent.removeMonitor(monitor)
-        }
-    }
+    // Cleanup happens in stop() — called before deallocation.
+    // Do not call NSEvent.removeMonitor in deinit as it may
+    // execute off the main thread.
 }

@@ -37,7 +37,7 @@ struct WiFiGuardApp: App {
         .defaultSize(width: 600, height: 400)
 
         Window("Settings", id: "settings") {
-            SettingsView()
+            SettingsView(settings: settings)
         }
         .defaultSize(width: 400, height: 250)
     }

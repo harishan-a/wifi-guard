@@ -50,8 +50,7 @@ final class ConnectionGuard {
 
         monitor.onDisconnect = { [weak self] in
             guard let self else { return }
-            // Detach from MainActor so reconnect work doesn't block the UI
-            Task.detached { [weak self] in
+            Task { [weak self] in
                 await self?.handleDisconnect()
             }
         }
@@ -217,6 +216,7 @@ final class ConnectionGuard {
     // MARK: - Disconnect handler
 
     func handleDisconnect() async {
+        guard !isReconnecting else { return }
         let health = await checkHealth()
 
         switch health {
@@ -260,7 +260,7 @@ final class ConnectionGuard {
                 "/usr/bin/dscacheutil", "-flushcache"
             )
             _ = try? await shell.runCommand(
-                "/usr/bin/sudo", "killall", "-HUP", "mDNSResponder"
+                "/usr/bin/killall", "-HUP", "mDNSResponder"
             )
             try? await Task.sleep(for: .seconds(2))
             let recheck = await checkHealth()
