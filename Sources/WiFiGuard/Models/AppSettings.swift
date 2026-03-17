@@ -18,6 +18,7 @@ final class AppSettings {
 
     var launchAtLogin: Bool {
         didSet {
+            guard Bundle.main.bundleIdentifier != nil else { return }
             if launchAtLogin {
                 try? SMAppService.mainApp.register()
             } else {
@@ -28,7 +29,6 @@ final class AppSettings {
 
     init() {
         let defaults = UserDefaults.standard
-        // Default to true for auto-reconnect and notifications
         if defaults.object(forKey: "autoReconnectEnabled") == nil {
             defaults.set(true, forKey: "autoReconnectEnabled")
         }
@@ -39,6 +39,12 @@ final class AppSettings {
         self.autoReconnectEnabled = defaults.bool(forKey: "autoReconnectEnabled")
         self.notificationsEnabled = defaults.bool(forKey: "notificationsEnabled")
         self.globalHotkeyEnabled = defaults.bool(forKey: "globalHotkeyEnabled")
-        self.launchAtLogin = (SMAppService.mainApp.status == .enabled)
+
+        // SMAppService requires a proper app bundle
+        if Bundle.main.bundleIdentifier != nil {
+            self.launchAtLogin = (SMAppService.mainApp.status == .enabled)
+        } else {
+            self.launchAtLogin = false
+        }
     }
 }
