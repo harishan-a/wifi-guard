@@ -8,6 +8,8 @@ struct MenuBarContent: View {
     let state: ConnectionState
     let disconnectLog: DisconnectLog
 
+    @Environment(\.openWindow) private var openWindow
+
     var body: some View {
         statusSection
 
@@ -15,7 +17,7 @@ struct MenuBarContent: View {
 
         recentDisconnectsSection
 
-        // Quick actions placeholder (Phase 4)
+        quickActionsSection
 
         Divider()
 
@@ -101,10 +103,42 @@ extension MenuBarContent {
                 }
                 Divider()
                 Button("View Full Log...") {
-                    // Phase 4: opens DisconnectLogView window
+                    openWindow(id: "disconnect-log")
                 }
             }
             Divider()
+        }
+    }
+}
+
+// MARK: - Quick Actions
+
+extension MenuBarContent {
+    private var shell: ShellExecutor { ShellExecutor() }
+
+    @ViewBuilder
+    private var quickActionsSection: some View {
+        Button("Restart Wi-Fi") {
+            Task {
+                _ = try? await shell.runCommand("/usr/sbin/networksetup", "-setairportpower", "en0", "off")
+                try? await Task.sleep(for: .seconds(2))
+                _ = try? await shell.runCommand("/usr/sbin/networksetup", "-setairportpower", "en0", "on")
+            }
+        }
+        Button("Flush DNS") {
+            Task {
+                _ = try? await shell.runCommand("/usr/bin/dscacheutil", "-flushcache")
+                _ = try? await shell.runCommand("/usr/bin/killall", "-HUP", "mDNSResponder")
+            }
+        }
+        Button("Copy IP Address") {
+            if !state.ipAddress.isEmpty {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(state.ipAddress, forType: .string)
+            }
+        }
+        Button("Run Diagnostics...") {
+            openWindow(id: "diagnostics")
         }
     }
 }

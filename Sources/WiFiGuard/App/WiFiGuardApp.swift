@@ -23,6 +23,16 @@ struct WiFiGuardApp: App {
                     await startServices()
                 }
         }
+
+        Window("Diagnostics", id: "diagnostics") {
+            DiagnosticsView()
+        }
+        .defaultSize(width: 550, height: 450)
+
+        Window("Disconnect Log", id: "disconnect-log") {
+            DisconnectLogView(disconnectLog: disconnectLog)
+        }
+        .defaultSize(width: 600, height: 400)
     }
 
     @MainActor
