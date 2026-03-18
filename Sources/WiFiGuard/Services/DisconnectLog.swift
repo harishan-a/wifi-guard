@@ -1,6 +1,5 @@
 import Foundation
 
-@MainActor
 @Observable
 final class DisconnectLog {
     private let maxEvents = 100

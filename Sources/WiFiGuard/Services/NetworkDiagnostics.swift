@@ -1,6 +1,5 @@
 import Foundation
 
-@MainActor
 final class NetworkDiagnostics {
 
     enum Severity: String, Sendable {
