@@ -86,39 +86,56 @@ Click the menu bar icon for live stats, quick actions, and access to diagnostics
 
 WiFi Guard uses an event-driven architecture built on three complementary mechanisms:
 
-```
-NWPathMonitor          CWEventDelegate          10s Polling Timer
-     |                       |                        |
-     |   path changed        |   SSID/link/power      |   RSSI + latency
-     |                       |   events                |   sampling
-     v                       v                        v
-  +----------------------------------------------------------+
-  |                    WiFiMonitor                            |
-  |          merges all signals into ConnectionState          |
-  +----------------------------------------------------------+
-                             |
-              disconnect detected?
-                             |
-                  +----------+----------+
-                  |                     |
-                  v                     v
-          ConnectionGuard        DisconnectLog
-          (auto-reconnect)       (event history)
+```mermaid
+graph TD
+    A["NWPathMonitor<br><i>path changes</i>"] --> D
+    B["CWEventDelegate<br><i>SSID / link / power events</i>"] --> D
+    C["10s Polling Timer<br><i>RSSI + latency sampling</i>"] --> D
+
+    D["WiFiMonitor<br>merges all signals → ConnectionState"]
+
+    D -- "disconnect detected" --> E["ConnectionGuard<br><i>auto-reconnect</i>"]
+    D -- "disconnect detected" --> F["DisconnectLog<br><i>event history</i>"]
+    D -- "state updated" --> G["MenuBarContent<br><i>live UI</i>"]
+
+    style A fill:#1a3a5c,stroke:#4a9eff,color:#fff
+    style B fill:#1a3a5c,stroke:#4a9eff,color:#fff
+    style C fill:#1a3a5c,stroke:#4a9eff,color:#fff
+    style D fill:#0d2137,stroke:#4a9eff,color:#fff,stroke-width:2px
+    style E fill:#1a3a5c,stroke:#2ecc71,color:#fff
+    style F fill:#1a3a5c,stroke:#2ecc71,color:#fff
+    style G fill:#1a3a5c,stroke:#2ecc71,color:#fff
 ```
 
 All shell commands use absolute paths (e.g., `/usr/sbin/networksetup`) with explicit argument arrays — no shell interpretation, no user input in commands.
 
 ## Architecture
 
-```
-Sources/WiFiGuard/
-  App/           Application entry point and AppDelegate
-  Models/        Data types — settings, connection state, events, health results
-  Services/      Core logic — monitoring, diagnostics, reconnection, shell execution
-  Utilities/     Helpers — formatting, icon mapping, signal strength
-  Views/         SwiftUI views — menu content, diagnostics, disconnect log, settings
-Resources/       App icon, Info.plist, entitlements
-Scripts/         Build, install, and icon generation scripts
+```mermaid
+graph LR
+    subgraph Sources/WiFiGuard
+        A["App<br><i>entry point, AppDelegate</i>"]
+        M["Models<br><i>settings, state, events</i>"]
+        S["Services<br><i>monitoring, diagnostics,<br>reconnection, shell</i>"]
+        U["Utilities<br><i>formatting, icons, signal</i>"]
+        V["Views<br><i>menu, diagnostics,<br>disconnect log, settings</i>"]
+    end
+
+    R["Resources<br><i>app icon, Info.plist,<br>entitlements</i>"]
+    SC["Scripts<br><i>build, install,<br>icon generation</i>"]
+
+    A --> S
+    V --> M
+    V --> S
+    S --> U
+
+    style A fill:#1a3a5c,stroke:#4a9eff,color:#fff
+    style M fill:#1a3a5c,stroke:#4a9eff,color:#fff
+    style S fill:#0d2137,stroke:#4a9eff,color:#fff,stroke-width:2px
+    style U fill:#1a3a5c,stroke:#4a9eff,color:#fff
+    style V fill:#1a3a5c,stroke:#4a9eff,color:#fff
+    style R fill:#2d2d3d,stroke:#888,color:#ccc
+    style SC fill:#2d2d3d,stroke:#888,color:#ccc
 ```
 
 ## Requirements
