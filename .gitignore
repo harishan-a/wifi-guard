@@ -1,6 +1,21 @@
+# Build
 .build/
 .swiftpm/
-*.xcodeproj/
-xcuserdata/
 DerivedData/
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+*.xcuserstate
+*.xcarchive
+
+# macOS
 .DS_Store
+*.swp
+*~
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace

@@ -1,0 +1,25 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  release:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and Create App Bundle
+        run: ./Scripts/build.sh
+
+      - name: Zip App Bundle
+        run: cd .build && zip -r WiFiGuard.app.zip WiFiGuard.app
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: .build/WiFiGuard.app.zip
