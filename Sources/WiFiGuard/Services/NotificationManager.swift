@@ -5,12 +5,17 @@ import UserNotifications
 final class NotificationManager {
     static let shared = NotificationManager()
 
-    private var center: UNUserNotificationCenter? {
-        guard Bundle.main.bundleIdentifier != nil else { return nil }
-        return UNUserNotificationCenter.current()
-    }
+    private let center: UNUserNotificationCenter?
 
-    private init() {}
+    private init() {
+        // UNUserNotificationCenter.current() crashes if there is no bundle identifier,
+        // so guard before accessing it.
+        if Bundle.main.bundleIdentifier != nil {
+            center = UNUserNotificationCenter.current()
+        } else {
+            center = nil
+        }
+    }
 
     func requestAuthorization() async {
         _ = try? await center?.requestAuthorization(options: [.alert, .sound])

@@ -34,7 +34,7 @@ struct WiFiGuardApp: App {
         Window("Disconnect Log", id: "disconnect-log") {
             DisconnectLogView(disconnectLog: disconnectLog)
         }
-        .defaultSize(width: 600, height: 400)
+        .defaultSize(width: 700, height: 500)
 
         Window("Settings", id: "settings") {
             SettingsView(settings: settings)
@@ -48,14 +48,21 @@ struct WiFiGuardApp: App {
         await NotificationManager.shared.requestAuthorization()
 
         // Wire ConnectionGuard notification callbacks
-        guard_.onReconnectSuccess = { ssid in
-            guard settings.notificationsEnabled else { return }
-            let ip = monitor.state.ipAddress
-            if let first = disconnectLog.events.first {
-                let duration = Date().timeIntervalSince(first.date)
-                disconnectLog.updateLast(reconnected: true, duration: duration)
+        guard_.onReconnectSuccess = { ssid, failureType, recoveryMethod in
+            // Always update the disconnect log, regardless of notification settings
+            if !disconnectLog.events.isEmpty && !disconnectLog.events[0].reconnected {
+                let duration = Date().timeIntervalSince(disconnectLog.events[0].date)
+                disconnectLog.updateLast(
+                    reconnected: true,
+                    duration: duration,
+                    reason: failureType,
+                    recoveryMethod: recoveryMethod
+                )
             }
-            NotificationManager.shared.notifyReconnected(ssid: ssid, ip: ip)
+            if settings.notificationsEnabled {
+                let ip = monitor.state.ipAddress
+                NotificationManager.shared.notifyReconnected(ssid: ssid, ip: ip)
+            }
         }
         guard_.onReconnectFailed = { attempt in
             guard settings.notificationsEnabled else { return }
@@ -69,13 +76,33 @@ struct WiFiGuardApp: App {
         guard_.start(monitor: monitor)
 
         // Wrap the guard's disconnect handler to also log events
-        // and respect the autoReconnect setting
+        // and respect the autoReconnect setting.
+        // Skip logging during active reconnection to avoid spurious events
+        // from power cycling.
         let guardHandler = monitor.onDisconnect
         monitor.onDisconnect = {
+            // Don't log spurious disconnects caused by reconnection power cycling
+            guard !guard_.isReconnecting else { return }
             disconnectLog.add(DisconnectEvent(reason: "Disconnected"))
             if settings.autoReconnectEnabled {
                 guardHandler?()
             }
+        }
+
+        // Wrap the reconnect handler to update the disconnect log when
+        // WiFi reconnects naturally (without ConnectionGuard intervention)
+        let guardReconnectHandler = monitor.onReconnect
+        monitor.onReconnect = {
+            // Update the most recent disconnect event if it hasn't been resolved yet
+            if !disconnectLog.events.isEmpty && !disconnectLog.events[0].reconnected {
+                let duration = Date().timeIntervalSince(disconnectLog.events[0].date)
+                disconnectLog.updateLast(
+                    reconnected: true,
+                    duration: duration,
+                    recoveryMethod: "Natural"
+                )
+            }
+            guardReconnectHandler?()
         }
 
         // Set up global hotkey (Ctrl+Opt+Cmd+W to restart Wi-Fi)

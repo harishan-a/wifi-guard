@@ -19,6 +19,7 @@ let package = Package(
                 .linkedFramework("CoreLocation"),
                 .linkedFramework("Network"),
                 .linkedFramework("ServiceManagement"),
+                .linkedFramework("SystemConfiguration"),
                 .linkedFramework("Carbon")
             ]
         )

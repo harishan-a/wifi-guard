@@ -96,13 +96,17 @@ extension MenuBarContent {
     @ViewBuilder
     private var recentDisconnectsSection: some View {
         if !disconnectLog.events.isEmpty {
+            let stats = ConnectionStats(events: disconnectLog.events)
+            Text(stats.menuBarSummary)
+
             Menu("Recent Disconnects") {
                 ForEach(disconnectLog.recentEvents) { event in
                     let dateStr = Self.dateFormatter.string(from: event.date)
                     let durStr = event.duration > 0
-                        ? " (\(DurationFormatter.format(event.duration)))"
+                        ? " \(DurationFormatter.format(event.duration))"
                         : ""
-                    Text("\(dateStr) \u{2014} \(event.reason)\(durStr)")
+                    let method = event.recoveryMethod.map { " via \($0)" } ?? ""
+                    Text("\(dateStr) \u{2014} \(event.reason)\(durStr)\(method)")
                 }
                 Divider()
                 Button("View Full Log...") {
