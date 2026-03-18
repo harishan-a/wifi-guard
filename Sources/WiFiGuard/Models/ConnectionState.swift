@@ -1,7 +1,6 @@
 import Foundation
 import SwiftUI
 
-@MainActor
 @Observable
 final class ConnectionState {
     var isConnected: Bool = false
