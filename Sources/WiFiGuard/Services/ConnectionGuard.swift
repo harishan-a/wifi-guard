@@ -1,4 +1,5 @@
 import Foundation
+import CoreWLAN
 
 @MainActor
 @Observable
@@ -15,34 +16,33 @@ final class ConnectionGuard {
 
     // MARK: - Callbacks
 
-    /// Called after a successful reconnection with the restored SSID.
-    var onReconnectSuccess: ((String) -> Void)?
-
-    /// Called after a failed reconnection attempt with the current failure count.
+    /// (ssid, failureType, recoveryMethod)
+    var onReconnectSuccess: ((String, String, String) -> Void)?
     var onReconnectFailed: ((Int) -> Void)?
 
-    // MARK: - Configuration (matching wifi-watchdog.sh)
+    /// Exposed so the app can log the diagnosed failure type when creating events.
+    private(set) var lastDiagnosis: String = "Disconnected"
+
+    // MARK: - Configuration
 
     private let wifiInterface = "en0"
-    private let pingTimeout: TimeInterval = 3
-    private let reconnectCooldown: TimeInterval = 30
-    private let maxBackoff: TimeInterval = 300
-    private let powerCycleWait: TimeInterval = 3
+    private let pingTimeout: TimeInterval = 2
     private let pingTargets = ["8.8.8.8", "1.1.1.1", "208.67.222.222"]
+    private let maxRetries = 15
 
     // MARK: - Private
 
     private let shell = ShellExecutor()
+    private let wifiClient = CWWiFiClient.shared()
     private weak var monitor: WiFiMonitor?
     private var lastKnownSSID: String = ""
+    private var retryTask: Task<Void, Never>?
 
     // MARK: - Start / Hook into WiFiMonitor
 
-    /// Hook into the monitor's disconnect callback to trigger reconnection.
     func start(monitor: WiFiMonitor) {
         self.monitor = monitor
 
-        // Capture the current SSID as the last known network
         let currentSSID = monitor.state.ssid
         if !currentSSID.isEmpty {
             lastKnownSSID = currentSSID
@@ -55,48 +55,77 @@ final class ConnectionGuard {
             }
         }
 
-        // Also track SSID changes so we always know the last good network
         monitor.onReconnect = { [weak self] in
             guard let self else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let ssid = self.monitor?.state.ssid ?? ""
+                let ssid = self.wifiClient.interface()?.ssid() ?? ""
                 if !ssid.isEmpty {
                     self.lastKnownSSID = ssid
                 }
+                self.retryTask?.cancel()
+                self.retryTask = nil
+                self.consecutiveFailures = 0
             }
         }
     }
 
-    // MARK: - Health Check (6-layer, same order as bash script)
+    // MARK: - Fast connectivity checks (no shell spawn)
+
+    private func currentSSID() -> String {
+        wifiClient.interface()?.ssid() ?? ""
+    }
+
+    private func isWiFiPoweredOn() -> Bool {
+        wifiClient.interface()?.powerOn() ?? false
+    }
+
+    private func hasIP() -> Bool {
+        NetworkQueries.ipAddress(for: wifiInterface) != nil
+    }
+
+    /// Instant connectivity check — zero shell spawns.
+    private func isBasicConnected() -> Bool {
+        !currentSSID().isEmpty && hasIP()
+    }
+
+    /// Diagnose what layer is broken — instant, no shell spawns.
+    private enum DisconnectType {
+        case noPower        // WiFi hardware off
+        case noSSID         // Not associated to any network
+        case noIP           // Associated but no IP (DHCP failure)
+    }
+
+    private func diagnose() -> DisconnectType? {
+        guard isWiFiPoweredOn() else { return .noPower }
+        let ssid = currentSSID()
+        guard !ssid.isEmpty else { return .noSSID }
+        if !ssid.isEmpty { lastKnownSSID = ssid }
+        guard hasIP() else { return .noIP }
+        return nil // connected
+    }
+
+    // MARK: - Health Check (6-layer, used for diagnostics/reporting)
 
     func checkHealth() async -> HealthCheckResult {
-        // Layer 1: Is Wi-Fi power on?
-        let powerOn = await checkWiFiPower()
-        guard powerOn else {
+        guard isWiFiPoweredOn() else {
             lastHealthCheck = .noPower
             return .noPower
         }
 
-        // Layer 2: Is there an SSID?
-        let ssid = await fetchSSID()
+        let ssid = currentSSID()
         guard !ssid.isEmpty else {
             lastHealthCheck = .noSSID
             return .noSSID
         }
-
-        // Remember this SSID for reconnection attempts
         lastKnownSSID = ssid
 
-        // Layer 3: Is there an IP address?
-        let ip = await fetchIPAddress()
-        guard !ip.isEmpty else {
+        guard hasIP() else {
             lastHealthCheck = .noIP
             return .noIP
         }
 
-        // Layer 4: Can we reach the gateway?
-        let gateway = await fetchGatewayIP()
+        let gateway = NetworkQueries.gatewayIP() ?? ""
         if !gateway.isEmpty {
             let gatewayReachable = await pingHost(gateway)
             guard gatewayReachable else {
@@ -105,7 +134,6 @@ final class ConnectionGuard {
             }
         }
 
-        // Layer 5: Can we reach the internet? (try each ping target)
         var internetReachable = false
         for target in pingTargets {
             if await pingHost(target) {
@@ -118,7 +146,6 @@ final class ConnectionGuard {
             return .noInternet
         }
 
-        // Layer 6: DNS resolution
         let dnsOK = await checkDNS()
         guard dnsOK else {
             lastHealthCheck = .noDNS
@@ -129,87 +156,204 @@ final class ConnectionGuard {
         return .healthy
     }
 
-    // MARK: - Reconnection
+    // MARK: - Smart Tiered Reconnection
 
+    /// Diagnose what's wrong, then apply the right fix for each failure mode.
+    /// This eliminates the 26s slow path where Tier 2 explicit rejoin wasted time
+    /// on DHCP failures (SSID present but no IP).
     func reconnect(reason: String) async {
-        // Calculate backoff: cooldown * 2^failures, capped at maxBackoff
-        let backoff = min(
-            reconnectCooldown * pow(2.0, Double(consecutiveFailures)),
-            maxBackoff
-        )
-
-        // If too soon since last attempt, skip
-        if let lastTime = lastReconnectTime {
-            let elapsed = Date().timeIntervalSince(lastTime)
-            if elapsed < backoff {
-                return
-            }
-        }
-
         isReconnecting = true
         totalReconnects += 1
         lastReconnectTime = Date()
 
-        // Step 1: Power cycle Wi-Fi off
-        _ = try? await shell.runCommand(
-            "/usr/sbin/networksetup", "-setairportpower", wifiInterface, "off"
-        )
-        try? await Task.sleep(for: .seconds(powerCycleWait))
-
-        // Step 2: Power cycle Wi-Fi on
-        _ = try? await shell.runCommand(
-            "/usr/sbin/networksetup", "-setairportpower", wifiInterface, "on"
-        )
-        try? await Task.sleep(for: .seconds(powerCycleWait))
-
-        // Step 3: Wait up to 15s for auto-join (check SSID + IP every second)
-        var autoJoined = false
-        for _ in 0..<15 {
-            let ssid = await fetchSSID()
-            let ip = await fetchIPAddress()
-            if !ssid.isEmpty && !ip.isEmpty {
-                autoJoined = true
-                break
+        // ── Tier 1: Wait for macOS auto-recovery (up to 1.5s) ──
+        // Data shows fast recoveries at ~1.5s average. Check every 200ms.
+        lastDiagnosis = "Disconnected"
+        for _ in 0..<8 {
+            try? await Task.sleep(for: .milliseconds(200))
+            if isBasicConnected() {
+                await finishSuccess(via: "Auto-recovery")
+                return
             }
-            try? await Task.sleep(for: .seconds(1))
         }
 
-        // Step 4: If auto-join failed, try explicit join to last known SSID
-        if !autoJoined && !lastKnownSSID.isEmpty {
+        // ── Tier 2: Diagnose and apply targeted fix ──
+        // Instead of a one-size-fits-all approach, fix what's actually broken.
+        let issue = diagnose()
+
+        switch issue {
+        case nil:
+            await finishSuccess(via: "Auto-recovery")
+            return
+
+        case .noIP:
+            lastDiagnosis = "No IP (DHCP)"
+            if await recoverDHCP() { return }
+            if await recoverReassociate() { return }
+
+        case .noSSID:
+            lastDiagnosis = "No SSID"
+            if await recoverExplicitJoin() { return }
+
+        case .noPower:
+            lastDiagnosis = "No Power"
+            break
+        }
+
+        // ── Tier 3: Power cycle (last resort) ──
+        if await recoverPowerCycle() { return }
+
+        // All tiers failed
+        consecutiveFailures += 1
+        isReconnecting = false
+        onReconnectFailed?(consecutiveFailures)
+        scheduleRetry(reason: reason)
+    }
+
+    // MARK: - Recovery strategies
+
+    /// Force DHCP renewal — fixes "SSID present, no IP" in ~2-3s instead of 26s.
+    private func recoverDHCP() async -> Bool {
+        _ = try? await shell.runCommand(
+            "/usr/sbin/ipconfig", "set", wifiInterface, "DHCP"
+        )
+        // Poll for IP for up to 5s
+        for _ in 0..<25 {
+            try? await Task.sleep(for: .milliseconds(200))
+            if isBasicConnected() {
+                await finishSuccess(via: "DHCP Renewal")
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Disassociate then reassociate — forces a fresh connection.
+    private func recoverReassociate() async -> Bool {
+        wifiClient.interface()?.disassociate()
+        try? await Task.sleep(for: .milliseconds(500))
+
+        if !lastKnownSSID.isEmpty {
             _ = try? await shell.runCommand(
                 "/usr/sbin/networksetup",
                 "-setairportnetwork", wifiInterface, lastKnownSSID
             )
-            // Wait up to 10s for the explicit join to complete
-            for _ in 0..<10 {
-                let ssid = await fetchSSID()
-                let ip = await fetchIPAddress()
-                if !ssid.isEmpty && !ip.isEmpty {
-                    autoJoined = true
-                    break
-                }
-                try? await Task.sleep(for: .seconds(1))
+        }
+
+        for _ in 0..<25 {
+            try? await Task.sleep(for: .milliseconds(200))
+            if isBasicConnected() {
+                await finishSuccess(via: "Reassociate")
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Explicit join to last known SSID.
+    private func recoverExplicitJoin() async -> Bool {
+        guard !lastKnownSSID.isEmpty else { return false }
+
+        _ = try? await shell.runCommand(
+            "/usr/sbin/networksetup",
+            "-setairportnetwork", wifiInterface, lastKnownSSID
+        )
+
+        for _ in 0..<25 {
+            try? await Task.sleep(for: .milliseconds(200))
+            if isBasicConnected() {
+                await finishSuccess(via: "Explicit Join")
+                return true
             }
         }
 
-        // Evaluate result
-        let health = await checkHealth()
+        if !currentSSID().isEmpty && !hasIP() {
+            return await recoverDHCP()
+        }
+        return false
+    }
 
-        if health.isHealthy {
-            consecutiveFailures = 0
-            successfulReconnects += 1
-            isReconnecting = false
+    /// Power cycle WiFi — nuclear option.
+    private func recoverPowerCycle() async -> Bool {
+        _ = try? await shell.runCommand(
+            "/usr/sbin/networksetup", "-setairportpower", wifiInterface, "off"
+        )
+        try? await Task.sleep(for: .milliseconds(500))
+        _ = try? await shell.runCommand(
+            "/usr/sbin/networksetup", "-setairportpower", wifiInterface, "on"
+        )
+        try? await Task.sleep(for: .seconds(1))
 
-            let restoredSSID = await fetchSSID()
-            onReconnectSuccess?(restoredSSID)
+        for _ in 0..<50 {
+            try? await Task.sleep(for: .milliseconds(200))
+            if isBasicConnected() {
+                await finishSuccess(via: "Power Cycle")
+                return true
+            }
+        }
 
-            // Refresh the monitor's state so the UI updates
-            await monitor?.refreshState()
-        } else {
-            consecutiveFailures += 1
-            isReconnecting = false
+        if !lastKnownSSID.isEmpty {
+            _ = try? await shell.runCommand(
+                "/usr/sbin/networksetup",
+                "-setairportnetwork", wifiInterface, lastKnownSSID
+            )
+            for _ in 0..<25 {
+                try? await Task.sleep(for: .milliseconds(200))
+                if isBasicConnected() {
+                    await finishSuccess(via: "Power Cycle + Join")
+                    return true
+                }
+            }
+        }
 
-            onReconnectFailed?(consecutiveFailures)
+        if !currentSSID().isEmpty && !hasIP() {
+            _ = try? await shell.runCommand(
+                "/usr/sbin/ipconfig", "set", wifiInterface, "DHCP"
+            )
+            for _ in 0..<20 {
+                try? await Task.sleep(for: .milliseconds(200))
+                if isBasicConnected() {
+                    await finishSuccess(via: "Power Cycle + DHCP")
+                    return true
+                }
+            }
+        }
+
+        return false
+    }
+
+    private func finishSuccess(via method: String = "Auto-recovery") async {
+        consecutiveFailures = 0
+        successfulReconnects += 1
+        isReconnecting = false
+
+        retryTask?.cancel()
+        retryTask = nil
+
+        let ssid = currentSSID()
+        onReconnectSuccess?(ssid, lastDiagnosis, method)
+        await monitor?.refreshState()
+    }
+
+    // MARK: - Retry loop
+
+    private func scheduleRetry(reason: String) {
+        guard consecutiveFailures < maxRetries else { return }
+        retryTask?.cancel()
+
+        let delay = min(3.0 * pow(2.0, Double(consecutiveFailures - 1)), 30.0)
+
+        retryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            guard let self else { return }
+
+            if self.isBasicConnected() {
+                self.consecutiveFailures = 0
+                await self.monitor?.refreshState()
+                return
+            }
+            await self.reconnect(reason: reason)
         }
     }
 
@@ -217,121 +361,17 @@ final class ConnectionGuard {
 
     func handleDisconnect() async {
         guard !isReconnecting else { return }
-        let health = await checkHealth()
 
-        switch health {
-        case .healthy:
-            // False alarm; nothing to do
-            return
+        retryTask?.cancel()
+        retryTask = nil
 
-        case .noPower:
-            // Wi-Fi hardware is off; user likely turned it off intentionally.
-            // Still attempt once in case it was a glitch.
-            await reconnect(reason: health.label)
+        if isBasicConnected() { return }
 
-        case .noSSID:
-            // Not associated; try reconnect immediately
-            await reconnect(reason: health.label)
-
-        case .noIP:
-            // Sometimes DHCP is just slow. Wait 5s and recheck.
-            try? await Task.sleep(for: .seconds(5))
-            let recheck = await checkHealth()
-            guard !recheck.isHealthy else { return }
-            await reconnect(reason: recheck.label)
-
-        case .noGateway:
-            // Gateway unreachable; short wait then reconnect
-            try? await Task.sleep(for: .seconds(3))
-            let recheck = await checkHealth()
-            guard !recheck.isHealthy else { return }
-            await reconnect(reason: recheck.label)
-
-        case .noInternet:
-            // Can reach gateway but not internet; might be transient
-            try? await Task.sleep(for: .seconds(3))
-            let recheck = await checkHealth()
-            guard !recheck.isHealthy else { return }
-            await reconnect(reason: recheck.label)
-
-        case .noDNS:
-            // DNS failure; flush the cache first, then recheck
-            _ = try? await shell.runCommand(
-                "/usr/bin/dscacheutil", "-flushcache"
-            )
-            _ = try? await shell.runCommand(
-                "/usr/bin/killall", "-HUP", "mDNSResponder"
-            )
-            try? await Task.sleep(for: .seconds(2))
-            let recheck = await checkHealth()
-            guard !recheck.isHealthy else { return }
-            await reconnect(reason: recheck.label)
-        }
+        await reconnect(reason: "Disconnected")
     }
 
-    // MARK: - Shell helpers
+    // MARK: - Shell helpers (only used for pings/DNS in full health check)
 
-    /// Check if Wi-Fi power is on via networksetup.
-    private func checkWiFiPower() async -> Bool {
-        guard let result = try? await shell.runCommand(
-            "/usr/sbin/networksetup", "-getairportpower", wifiInterface
-        ), result.exitCode == 0 else {
-            return false
-        }
-        // Output: "Wi-Fi Power (en0): On" or "Wi-Fi Power (en0): Off"
-        return result.output.lowercased().contains(": on")
-    }
-
-    /// Fetch the current SSID from networksetup.
-    private func fetchSSID() async -> String {
-        guard let result = try? await shell.runCommand(
-            "/usr/sbin/networksetup", "-getairportnetwork", wifiInterface
-        ), result.exitCode == 0 else {
-            return ""
-        }
-        // Output: "Current Wi-Fi Network: MyNetwork" or
-        //         "You are not associated with an AirPort network."
-        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        if output.contains("not associated") {
-            return ""
-        }
-        // Parse "Current Wi-Fi Network: <SSID>"
-        if let colonRange = output.range(of: ": ") {
-            return String(output[colonRange.upperBound...])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return ""
-    }
-
-    /// Fetch the IP address for the Wi-Fi interface.
-    private func fetchIPAddress() async -> String {
-        guard let result = try? await shell.runCommand(
-            "/usr/sbin/ipconfig", "getifaddr", wifiInterface
-        ), result.exitCode == 0 else {
-            return ""
-        }
-        return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Fetch the gateway IP from networksetup.
-    private func fetchGatewayIP() async -> String {
-        guard let result = try? await shell.runCommand(
-            "/usr/sbin/networksetup", "-getinfo", "Wi-Fi"
-        ), result.exitCode == 0 else {
-            return ""
-        }
-        for line in result.output.components(separatedBy: "\n") {
-            if line.hasPrefix("Router:") {
-                let ip = line
-                    .replacingOccurrences(of: "Router:", with: "")
-                    .trimmingCharacters(in: .whitespaces)
-                return ip == "none" ? "" : ip
-            }
-        }
-        return ""
-    }
-
-    /// Ping a host once with the configured timeout.
     private func pingHost(_ host: String) async -> Bool {
         let timeoutStr = String(Int(pingTimeout * 1000))
         guard let result = try? await shell.runCommand(
@@ -343,7 +383,6 @@ final class ConnectionGuard {
         return result.exitCode == 0
     }
 
-    /// Check DNS resolution via nslookup.
     private func checkDNS() async -> Bool {
         guard let result = try? await shell.runCommand(
             "/usr/bin/nslookup", "apple.com",
@@ -351,8 +390,6 @@ final class ConnectionGuard {
         ) else {
             return false
         }
-        // nslookup returns 0 on success and the output contains "Address:"
-        // lines for the resolved IPs (beyond the server's own address)
         return result.exitCode == 0 && result.output.contains("Name:")
     }
 }

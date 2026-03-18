@@ -2,7 +2,7 @@ import Foundation
 
 @Observable
 final class DisconnectLog {
-    private let maxEvents = 100
+    private let maxEvents = 500
     private let defaultsKey = "disconnectEvents"
 
     private(set) var events: [DisconnectEvent] = []
@@ -20,15 +20,21 @@ final class DisconnectLog {
         save()
     }
 
-    /// Update the most recent event (e.g., to set reconnected=true and duration).
-    func updateLast(reconnected: Bool, duration: TimeInterval) {
+    /// Update the most recent event with reconnection details.
+    func updateLast(
+        reconnected: Bool,
+        duration: TimeInterval,
+        reason: String? = nil,
+        recoveryMethod: String? = nil
+    ) {
         guard !events.isEmpty else { return }
         let old = events[0]
         events[0] = DisconnectEvent(
             date: old.date,
-            reason: old.reason,
+            reason: reason ?? old.reason,
             duration: duration,
-            reconnected: reconnected
+            reconnected: reconnected,
+            recoveryMethod: recoveryMethod ?? old.recoveryMethod
         )
         save()
     }
@@ -46,11 +52,12 @@ final class DisconnectLog {
 
     /// Export to CSV string.
     func exportCSV() -> String {
-        var csv = "Date,Reason,Duration (s),Reconnected\n"
+        var csv = "Date,Reason,Duration (s),Reconnected,Recovery Method\n"
         let formatter = ISO8601DateFormatter()
         for event in events {
             let dateStr = formatter.string(from: event.date)
-            csv += "\(dateStr),\"\(event.reason)\",\(String(format: "%.0f", event.duration)),\(event.reconnected)\n"
+            let method = event.recoveryMethod ?? ""
+            csv += "\(dateStr),\"\(event.reason)\",\(String(format: "%.1f", event.duration)),\(event.reconnected),\"\(method)\"\n"
         }
         return csv
     }

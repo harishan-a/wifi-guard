@@ -2,6 +2,7 @@ import Foundation
 import Network
 import CoreWLAN
 import CoreLocation
+import SystemConfiguration
 
 @MainActor
 @Observable
@@ -26,6 +27,10 @@ final class WiFiMonitor: NSObject {
 
     private var refreshTimer: DispatchSourceTimer?
     private var wasConnected = false
+    private var currentTimerInterval: Double = 10.0
+
+    /// Debounce: coalesce rapid-fire CWEvent/NWPath callbacks into a single refresh.
+    private var pendingRefresh: Task<Void, Never>?
 
     // MARK: - Lifecycle
 
@@ -33,30 +38,24 @@ final class WiFiMonitor: NSObject {
         super.init()
     }
 
-    /// Begin monitoring Wi-Fi state. Sets up NWPathMonitor, CWEventDelegate,
-    /// and a 10-second refresh timer for RSSI / latency polling.
     func start() {
         guard !isMonitoring else { return }
         isMonitoring = true
 
-        // -- NWPathMonitor for connectivity changes --
-        // Create a fresh monitor each time (cancel() is terminal)
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] _ in
             Task { @MainActor [weak self] in
-                await self?.refreshState()
+                self?.scheduleRefresh()
             }
         }
         monitor.start(queue: monitorQueue)
         pathMonitor = monitor
 
-        // -- CWEventDelegate for SSID / link changes --
         wifiClient.delegate = self
         try? wifiClient.startMonitoringEvent(with: .ssidDidChange)
         try? wifiClient.startMonitoringEvent(with: .linkDidChange)
         try? wifiClient.startMonitoringEvent(with: .powerDidChange)
 
-        // -- Periodic timer (10s) for RSSI + gateway latency --
         let timer = DispatchSource.makeTimerSource(queue: monitorQueue)
         timer.schedule(deadline: .now(), repeating: 10.0)
         timer.setEventHandler { [weak self] in
@@ -67,13 +66,11 @@ final class WiFiMonitor: NSObject {
         timer.resume()
         refreshTimer = timer
 
-        // -- Initial read --
         Task {
             await refreshState()
         }
     }
 
-    /// Stop all monitoring and tear down timers.
     func stop() {
         guard isMonitoring else { return }
         isMonitoring = false
@@ -86,43 +83,57 @@ final class WiFiMonitor: NSObject {
 
         refreshTimer?.cancel()
         refreshTimer = nil
+
+        pendingRefresh?.cancel()
+        pendingRefresh = nil
+    }
+
+    // MARK: - Debounced refresh
+
+    /// Coalesce rapid-fire events: wait 100ms, then refresh once.
+    private func scheduleRefresh() {
+        pendingRefresh?.cancel()
+        pendingRefresh = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled else { return }
+            await self?.refreshState()
+        }
     }
 
     // MARK: - State refresh
 
-    /// Read current Wi-Fi details and update `state`.
     func refreshState() async {
         let iface = wifiClient.interface()
 
-        // SSID (requires location authorization on macOS 12+)
+        // CoreWLAN reads are instant — no shell spawn
         let ssid = iface?.ssid() ?? ""
-
-        // RSSI
         let rssi = iface?.rssiValue() ?? 0
-
-        // Wi-Fi power
         let wifiPoweredOn = iface?.powerOn() ?? false
 
-        // IP address via ipconfig
-        let ipAddress = await fetchIPAddress()
-
-        // Gateway IP via networksetup
-        let gatewayIP = await fetchGatewayIP()
-
-        // Gateway latency via ping (only if we have a gateway)
-        var latency: Double? = nil
-        if !gatewayIP.isEmpty {
-            latency = await fetchGatewayLatency(gateway: gatewayIP)
-        }
+        // IP address via getifaddrs() — instant syscall, no shell spawn
+        let ipAddress = NetworkQueries.ipAddress(for: "en0") ?? ""
 
         // Determine if connected
         let isConnected = wifiPoweredOn && !ssid.isEmpty && !ipAddress.isEmpty
 
+        // Gateway via SCDynamicStore (instant) + latency via ping (only when connected).
+        // When disconnected, the entire refresh is zero shell spawns.
+        var gatewayIP = ""
+        var latency: Double? = nil
+        if isConnected {
+            gatewayIP = NetworkQueries.gatewayIP() ?? ""
+            if !gatewayIP.isEmpty {
+                latency = await fetchGatewayLatency(gateway: gatewayIP)
+            }
+        }
+
         // Detect transitions
         if wasConnected && !isConnected {
             onDisconnect?()
+            rescheduleTimer(interval: 2.0)
         } else if !wasConnected && isConnected {
             onReconnect?()
+            rescheduleTimer(interval: 10.0)
         }
 
         // Update connectedSince on transitions
@@ -144,36 +155,26 @@ final class WiFiMonitor: NSObject {
         state.gatewayLatencyMs = latency
     }
 
-    // MARK: - Shell helpers
+    // MARK: - Timer management
 
-    private func fetchIPAddress() async -> String {
-        guard let result = try? await shell.runCommand(
-            "/usr/sbin/ipconfig", "getifaddr", "en0"
-        ), result.exitCode == 0 else {
-            return ""
-        }
-        return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    private func rescheduleTimer(interval: Double) {
+        guard interval != currentTimerInterval else { return }
+        currentTimerInterval = interval
 
-    private func fetchGatewayIP() async -> String {
-        guard let result = try? await shell.runCommand(
-            "/usr/sbin/networksetup", "-getinfo", "Wi-Fi"
-        ), result.exitCode == 0 else {
-            return ""
-        }
-        for line in result.output.components(separatedBy: "\n") {
-            if line.hasPrefix("Router:") {
-                let ip = line
-                    .replacingOccurrences(of: "Router:", with: "")
-                    .trimmingCharacters(in: .whitespaces)
-                return ip == "none" ? "" : ip
+        refreshTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: monitorQueue)
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                await self?.refreshState()
             }
         }
-        return ""
+        timer.resume()
+        refreshTimer = timer
     }
 
-    /// Ping the gateway once and parse `time=<ms>` from the output.
-    /// Note: macOS `ping -W` expects milliseconds.
+    // MARK: - Shell helpers
+
     private func fetchGatewayLatency(gateway: String) async -> Double? {
         guard let result = try? await shell.runCommand(
             "/sbin/ping", "-c", "1", "-W", "2000", gateway,
@@ -196,25 +197,25 @@ extension WiFiMonitor: CWEventDelegate {
 
     nonisolated func clientConnectionDidDissociate() {
         Task { @MainActor [weak self] in
-            await self?.refreshState()
+            self?.scheduleRefresh()
         }
     }
 
     nonisolated func ssidDidChangeForWiFiInterface(withName interfaceName: String) {
         Task { @MainActor [weak self] in
-            await self?.refreshState()
+            self?.scheduleRefresh()
         }
     }
 
     nonisolated func linkDidChangeForWiFiInterface(withName interfaceName: String) {
         Task { @MainActor [weak self] in
-            await self?.refreshState()
+            self?.scheduleRefresh()
         }
     }
 
     nonisolated func powerStateDidChangeForWiFiInterface(withName interfaceName: String) {
         Task { @MainActor [weak self] in
-            await self?.refreshState()
+            self?.scheduleRefresh()
         }
     }
 }
