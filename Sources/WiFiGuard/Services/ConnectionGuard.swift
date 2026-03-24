@@ -30,18 +30,40 @@ final class ConnectionGuard {
     private let pingTargets = ["8.8.8.8", "1.1.1.1", "208.67.222.222"]
     private let maxRetries = 15
 
+    // MARK: - Flap detection
+
+    private var recentDisconnectTimestamps: [Date] = []
+    private let flapThreshold = 5
+    private let flapWindowSeconds: TimeInterval = 300
+
+    /// Whether the connection is rapidly cycling (>flapThreshold drops in flapWindowSeconds).
+    var isFlapping: Bool {
+        let cutoff = Date().addingTimeInterval(-flapWindowSeconds)
+        return recentDisconnectTimestamps.filter { $0 >= cutoff }.count >= flapThreshold
+    }
+
+    // MARK: - Counters (for stats/observability)
+
+    private(set) var totalPowerCycles: Int = 0
+    private(set) var totalExplicitJoinSkips: Int = 0
+    private(set) var totalFlapEvents: Int = 0
+    private(set) var lastDisconnectRSSI: Int = 0
+
     // MARK: - Private
 
     private let shell = ShellExecutor()
     private let wifiClient = CWWiFiClient.shared()
     private weak var monitor: WiFiMonitor?
+    private weak var settings: AppSettings?
     private var lastKnownSSID: String = ""
     private var retryTask: Task<Void, Never>?
+    private var wasFlapping = false
 
     // MARK: - Start / Hook into WiFiMonitor
 
-    func start(monitor: WiFiMonitor) {
+    func start(monitor: WiFiMonitor, settings: AppSettings? = nil) {
         self.monitor = monitor
+        self.settings = settings
 
         let currentSSID = monitor.state.ssid
         if !currentSSID.isEmpty {
@@ -193,7 +215,15 @@ final class ConnectionGuard {
 
         case .noSSID:
             lastDiagnosis = "No SSID"
-            if await recoverExplicitJoin() { return }
+            // Explicit Join has 0% success rate on first attempt (0/84 in disconnect log
+            // analysis). Skip it on first attempt unless the user has opted in via settings.
+            // On retries, always try it since the AP may have recovered.
+            let tryExplicitJoin = consecutiveFailures > 0 || (settings?.explicitJoinOnFirstAttempt ?? false)
+            if tryExplicitJoin {
+                if await recoverExplicitJoin() { return }
+            } else {
+                totalExplicitJoinSkips += 1
+            }
 
         case .noPower:
             lastDiagnosis = "No Power"
@@ -275,6 +305,7 @@ final class ConnectionGuard {
 
     /// Power cycle WiFi — nuclear option.
     private func recoverPowerCycle() async -> Bool {
+        totalPowerCycles += 1
         _ = try? await shell.runCommand(
             "/usr/sbin/networksetup", "-setairportpower", wifiInterface, "off"
         )
@@ -310,7 +341,9 @@ final class ConnectionGuard {
             _ = try? await shell.runCommand(
                 "/usr/sbin/ipconfig", "set", wifiInterface, "DHCP"
             )
-            for _ in 0..<20 {
+            // Extended from 4s to 8s — log analysis showed ~41 events where DHCP
+            // completed just after the original 4s window, causing misattribution.
+            for _ in 0..<40 {
                 try? await Task.sleep(for: .milliseconds(200))
                 if isBasicConnected() {
                     await finishSuccess(via: "Power Cycle + DHCP")
@@ -330,9 +363,19 @@ final class ConnectionGuard {
         retryTask?.cancel()
         retryTask = nil
 
+        // Flush DNS after Power Cycle recoveries to prevent stale cache
+        if method.hasPrefix("Power Cycle") && (settings?.flushDNSOnRecovery ?? true) {
+            await flushDNSCache()
+        }
+
         let ssid = currentSSID()
         onReconnectSuccess?(ssid, lastDiagnosis, method)
         await monitor?.refreshState()
+    }
+
+    private func flushDNSCache() async {
+        _ = try? await shell.runCommand("/usr/bin/dscacheutil", "-flushcache")
+        _ = try? await shell.runCommand("/usr/bin/killall", "-HUP", "mDNSResponder")
     }
 
     // MARK: - Retry loop
@@ -366,6 +409,22 @@ final class ConnectionGuard {
         retryTask = nil
 
         if isBasicConnected() { return }
+
+        // Track flap state
+        let now = Date()
+        recentDisconnectTimestamps.append(now)
+        let cutoff = now.addingTimeInterval(-flapWindowSeconds)
+        recentDisconnectTimestamps.removeAll { $0 < cutoff }
+
+        if isFlapping && !wasFlapping {
+            totalFlapEvents += 1
+            wasFlapping = true
+        } else if !isFlapping {
+            wasFlapping = false
+        }
+
+        // Record RSSI at time of disconnect for diagnostics
+        lastDisconnectRSSI = monitor?.state.rssi ?? 0
 
         await reconnect(reason: "Disconnected")
     }

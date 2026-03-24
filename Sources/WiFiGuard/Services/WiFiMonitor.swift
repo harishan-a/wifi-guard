@@ -17,6 +17,11 @@ final class WiFiMonitor: NSObject {
     var onDisconnect: (() -> Void)?
     /// Called when connection is restored (was disconnected, now connected).
     var onReconnect: (() -> Void)?
+    /// Called when signal strength drops below threshold while connected.
+    var onWeakSignal: ((Int) -> Void)?
+
+    /// Configurable RSSI threshold for weak signal alerts. Default: -70 dBm.
+    var rssiWarningThreshold: Int = -70
 
     // MARK: - Private properties
 
@@ -31,6 +36,10 @@ final class WiFiMonitor: NSObject {
 
     /// Debounce: coalesce rapid-fire CWEvent/NWPath callbacks into a single refresh.
     private var pendingRefresh: Task<Void, Never>?
+
+    /// Cooldown for weak signal notifications (avoid spam).
+    private var lastWeakSignalNotification: Date? = nil
+    private let weakSignalCooldown: TimeInterval = 300
 
     // MARK: - Lifecycle
 
@@ -133,6 +142,23 @@ final class WiFiMonitor: NSObject {
             rescheduleTimer(interval: 2.0)
         } else if !wasConnected && isConnected {
             onReconnect?()
+            rescheduleTimer(interval: 10.0)
+        }
+
+        // Proactive RSSI monitoring: warn on weak signal, increase polling frequency
+        if isConnected && rssi < rssiWarningThreshold && rssi != 0 {
+            let now = Date()
+            if lastWeakSignalNotification == nil ||
+               now.timeIntervalSince(lastWeakSignalNotification!) >= weakSignalCooldown {
+                lastWeakSignalNotification = now
+                onWeakSignal?(rssi)
+            }
+            // Poll faster during weak signal for earlier drop detection
+            if wasConnected && isConnected {
+                rescheduleTimer(interval: 5.0)
+            }
+        } else if isConnected && wasConnected {
+            // Normal signal, ensure we're at standard polling
             rescheduleTimer(interval: 10.0)
         }
 
