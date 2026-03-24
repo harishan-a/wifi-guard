@@ -59,21 +59,34 @@ struct WiFiGuardApp: App {
                     recoveryMethod: recoveryMethod
                 )
             }
-            if settings.notificationsEnabled {
+            // Suppress per-event notifications during rapid flapping to avoid fatigue
+            if settings.notificationsEnabled && !guard_.isFlapping {
                 let ip = monitor.state.ipAddress
                 NotificationManager.shared.notifyReconnected(ssid: ssid, ip: ip)
             }
         }
         guard_.onReconnectFailed = { attempt in
             guard settings.notificationsEnabled else { return }
+            // During flapping, only notify on significant failures (every 5th attempt)
+            if guard_.isFlapping && attempt % 5 != 0 { return }
             NotificationManager.shared.notifyReconnectFailed(attempt: attempt)
+        }
+
+        // Wire weak signal alerts
+        monitor.onWeakSignal = { rssi in
+            guard settings.notificationsEnabled else { return }
+            NotificationManager.shared.send(
+                title: "Weak Wi-Fi Signal",
+                body: "Signal strength is \(rssi) dBm. Consider moving closer to your router."
+            )
         }
 
         // Start monitoring
         monitor.start()
 
         // Hook guard into monitor (this sets monitor.onDisconnect)
-        guard_.start(monitor: monitor)
+        guard_.start(monitor: monitor, settings: settings)
+        monitor.rssiWarningThreshold = settings.rssiWarningThreshold
 
         // Wrap the guard's disconnect handler to also log events
         // and respect the autoReconnect setting.
@@ -90,17 +103,21 @@ struct WiFiGuardApp: App {
         }
 
         // Wrap the reconnect handler to update the disconnect log when
-        // WiFi reconnects naturally (without ConnectionGuard intervention)
+        // WiFi reconnects naturally (without ConnectionGuard intervention).
+        // Only attribute "Natural" when ConnectionGuard is NOT actively reconnecting —
+        // otherwise let ConnectionGuard attribute the correct method (Power Cycle, etc.)
+        // via finishSuccess → onReconnectSuccess.
         let guardReconnectHandler = monitor.onReconnect
         monitor.onReconnect = {
-            // Update the most recent disconnect event if it hasn't been resolved yet
-            if !disconnectLog.events.isEmpty && !disconnectLog.events[0].reconnected {
-                let duration = Date().timeIntervalSince(disconnectLog.events[0].date)
-                disconnectLog.updateLast(
-                    reconnected: true,
-                    duration: duration,
-                    recoveryMethod: "Natural"
-                )
+            if !guard_.isReconnecting {
+                if !disconnectLog.events.isEmpty && !disconnectLog.events[0].reconnected {
+                    let duration = Date().timeIntervalSince(disconnectLog.events[0].date)
+                    disconnectLog.updateLast(
+                        reconnected: true,
+                        duration: duration,
+                        recoveryMethod: "Natural"
+                    )
+                }
             }
             guardReconnectHandler?()
         }
